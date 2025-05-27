@@ -29,13 +29,15 @@ async def get_db_pool():
         db_port = os.getenv("DB_PORT", "5432")
         db_name = os.getenv("DB_NAME", "postgres")
 
-        # 创建数据库连接池
+        # 创建数据库连接池，设置最小和最大连接数
         db_pool = await asyncpg.create_pool(
             user=db_user,
             password=db_password,
             host=db_host,
             port=db_port,
-            database=db_name
+            database=db_name,
+            min_size=5,  # 最小连接数
+            max_size=20  # 最大连接数
         )
     return db_pool
 
@@ -79,12 +81,19 @@ async def query_faq(
     query += f" ORDER BY create_at DESC LIMIT ${param_index}"
     params.append(limit)
 
-    # 执行查询
-    async with pool.acquire() as conn:
-        results = await conn.fetch(query, *params)
-
-    # 转换结果为字典列表
-    return [dict(row) for row in results]
+    try:
+        # 使用独立的连接执行查询
+        conn = await pool.acquire()
+        try:
+            results = await conn.fetch(query, *params)
+            # 转换结果为字典列表
+            return [dict(row) for row in results]
+        finally:
+            # 确保连接被归还到池中
+            await pool.release(conn)
+    except Exception as e:
+        await ctx.error(f"查询出错: {str(e)}")
+        return []
 
 
 @mcp.tool()
@@ -132,12 +141,19 @@ async def query_menu(
     query += f" ORDER BY sort ASC, create_time DESC LIMIT ${param_index}"
     params.append(limit)
 
-    # 执行查询
-    async with pool.acquire() as conn:
-        results = await conn.fetch(query, *params)
-
-    # 转换结果为字典列表
-    return [dict(row) for row in results]
+    try:
+        # 使用独立的连接执行查询
+        conn = await pool.acquire()
+        try:
+            results = await conn.fetch(query, *params)
+            # 转换结果为字典列表
+            return [dict(row) for row in results]
+        finally:
+            # 确保连接被归还到池中
+            await pool.release(conn)
+    except Exception as e:
+        await ctx.error(f"查询出错: {str(e)}")
+        return []
 
 
 @mcp.tool()
@@ -150,25 +166,34 @@ async def get_faq_statistics(ctx: Context = None) -> Dict:
     # 获取数据库连接池
     pool = await get_db_pool()
 
-    async with pool.acquire() as conn:
-        # 获取总数
-        total_count = await conn.fetchval("SELECT COUNT(*) FROM public.cheery_exeedcars_faq")
+    try:
+        # 使用独立的连接执行查询
+        conn = await pool.acquire()
+        try:
+            # 获取总数
+            total_count = await conn.fetchval("SELECT COUNT(*) FROM public.cheery_exeedcars_faq")
 
-        # 获取各工单类型数量
-        ticket_type_stats = await conn.fetch(
-            "SELECT ticket_type, COUNT(*) as count FROM public.cheery_exeedcars_faq GROUP BY ticket_type"
-        )
+            # 获取各工单类型数量
+            ticket_type_stats = await conn.fetch(
+                "SELECT ticket_type, COUNT(*) as count FROM public.cheery_exeedcars_faq GROUP BY ticket_type"
+            )
 
-        # 获取各问题分类数量
-        issue_module_stats = await conn.fetch(
-            "SELECT issue_module, COUNT(*) as count FROM public.cheery_exeedcars_faq GROUP BY issue_module"
-        )
+            # 获取各问题分类数量
+            issue_module_stats = await conn.fetch(
+                "SELECT issue_module, COUNT(*) as count FROM public.cheery_exeedcars_faq GROUP BY issue_module"
+            )
 
-    return {
-        "total_count": total_count,
-        "ticket_type_stats": [dict(row) for row in ticket_type_stats],
-        "issue_module_stats": [dict(row) for row in issue_module_stats]
-    }
+            return {
+                "total_count": total_count,
+                "ticket_type_stats": [dict(row) for row in ticket_type_stats],
+                "issue_module_stats": [dict(row) for row in issue_module_stats]
+            }
+        finally:
+            # 确保连接被归还到池中
+            await pool.release(conn)
+    except Exception as e:
+        await ctx.error(f"统计出错: {str(e)}")
+        return {"error": str(e)}
 
 
 @mcp.tool()
@@ -181,25 +206,34 @@ async def get_menu_statistics(ctx: Context = None) -> Dict:
     # 获取数据库连接池
     pool = await get_db_pool()
 
-    async with pool.acquire() as conn:
-        # 获取总数
-        total_count = await conn.fetchval("SELECT COUNT(*) FROM public.sys_menu")
+    try:
+        # 使用独立的连接执行查询
+        conn = await pool.acquire()
+        try:
+            # 获取总数
+            total_count = await conn.fetchval("SELECT COUNT(*) FROM public.sys_menu")
 
-        # 获取各菜单类型数量
-        menu_type_stats = await conn.fetch(
-            "SELECT menu_type, COUNT(*) as count FROM public.sys_menu GROUP BY menu_type"
-        )
+            # 获取各菜单类型数量
+            menu_type_stats = await conn.fetch(
+                "SELECT menu_type, COUNT(*) as count FROM public.sys_menu GROUP BY menu_type"
+            )
 
-        # 获取启用/禁用菜单数量
-        status_stats = await conn.fetch(
-            "SELECT is_disable, COUNT(*) as count FROM public.sys_menu GROUP BY is_disable"
-        )
+            # 获取启用/禁用菜单数量
+            status_stats = await conn.fetch(
+                "SELECT is_disable, COUNT(*) as count FROM public.sys_menu GROUP BY is_disable"
+            )
 
-    return {
-        "total_count": total_count,
-        "menu_type_stats": [dict(row) for row in menu_type_stats],
-        "status_stats": [dict(row) for row in status_stats]
-    }
+            return {
+                "total_count": total_count,
+                "menu_type_stats": [dict(row) for row in menu_type_stats],
+                "status_stats": [dict(row) for row in status_stats]
+            }
+        finally:
+            # 确保连接被归还到池中
+            await pool.release(conn)
+    except Exception as e:
+        await ctx.error(f"统计出错: {str(e)}")
+        return {"error": str(e)}
 
 
 # 初始化和清理函数
