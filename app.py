@@ -1,45 +1,65 @@
-import asyncio
 import os
-from typing import List, Dict, Optional, Annotated
+import logging
+from typing import Optional, Annotated
 from fastmcp import FastMCP, Context
 from pydantic import Field
-import asyncpg
 from dotenv import load_dotenv
-import uvicorn
-from starlette.applications import Starlette
-from starlette.routing import Mount
+import threading
+import psycopg
+from psycopg import Connection
+
+from psycopg.rows import dict_row
+from psycopg.rows import tuple_row
+import yaml
+import uuid
+from collections.abc import Callable
+from typing import Any
+
+# 配置日志
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("app.log")
+    ]
+)
+logger = logging.getLogger("postgres-query-service")
 
 # 加载环境变量
 load_dotenv()
+logger.info("环境变量已加载")
 
 # 创建FastMCP服务器实例
 mcp = FastMCP(name="PostgreSQL查询服务")
 
 # 数据库连接池
 db_pool = None
+# 同步锁，用于保护数据库连接池
+db_lock = threading.Lock()
 
 
-async def get_db_pool():
-    global db_pool
-    if db_pool is None:
-        # 从环境变量获取数据库连接信息
-        db_user = os.getenv("DB_USER", "admin")
-        db_password = os.getenv("DB_PASSWORD", "password")
-        db_host = os.getenv("DB_HOST", "postgres")
-        db_port = os.getenv("DB_PORT", "5432")
-        db_name = os.getenv("DB_NAME", "postgres")
+def get_db_connection(row_factory: Callable[[Any], Any] = tuple_row) -> Connection:
+    """
+    Get a database connection
 
-        # 创建数据库连接池，设置最小和最大连接数
-        db_pool = await asyncpg.create_pool(
-            user=db_user,
-            password=db_password,
-            host=db_host,
-            port=db_port,
-            database=db_name,
-            min_size=5,  # 最小连接数
-            max_size=20  # 最大连接数
-        )
-    return db_pool
+    Args:
+        row_factory: The row factory to use.
+
+    Returns:
+        A database connection.
+    """
+    # config = get_config()
+    return psycopg.connect(
+        host=os.getenv("DB_HOST", "localhost"),
+        port=os.getenv("DB_PORT", 5432),
+        user=os.getenv("DB_USER", "postgres"),
+        password=os.getenv("DB_PASSWORD", "postgres"),
+        dbname=os.getenv("DB_NAME", "postgres"),
+        row_factory=row_factory,
+    )
+
+
 
 
 @mcp.tool()
@@ -49,14 +69,12 @@ async def query_faq(
         issue_module: Annotated[Optional[str], Field(description="问题分类")] = None,
         limit: Annotated[int, Field(description="返回结果数量限制", ge=1, le=100)] = 10,
         ctx: Context = None
-) -> List[Dict]:
+) -> str:
     """
     查询奇瑞星途客户问答表(cheery_exeedcars_faq)，可根据问题关键词、工单类型、问题分类进行筛选
     """
     await ctx.info(f"正在查询FAQ数据...")
-
-    # 获取数据库连接池
-    pool = await get_db_pool()
+    logger.info(f"开始FAQ查询，参数: 问题={question}, 工单类型={ticket_type}, 问题分类={issue_module}, 限制={limit}")
 
     # 构建SQL查询
     query = "SELECT * FROM public.cheery_exeedcars_faq WHERE 1=1"
@@ -67,33 +85,53 @@ async def query_faq(
         query += f" AND question ILIKE ${param_index}"
         params.append(f'%{question}%')
         param_index += 1
+        logger.debug(f"添加问题过滤条件: question ILIKE '%{question}%'")
 
     if ticket_type:
         query += f" AND ticket_type = ${param_index}"
         params.append(ticket_type)
         param_index += 1
+        logger.debug(f"添加工单类型过滤条件: ticket_type = '{ticket_type}'")
 
     if issue_module:
         query += f" AND issue_module = ${param_index}"
         params.append(issue_module)
         param_index += 1
+        logger.debug(f"添加问题分类过滤条件: issue_module = '{issue_module}'")
 
     query += f" ORDER BY create_at DESC LIMIT ${param_index}"
     params.append(limit)
+    
+    # 记录最终SQL和参数
+    logger.info(f"构建的SQL查询: {query}")
+    logger.info(f"查询参数: {params}")
+    
+    # 构建带值的SQL用于调试（注意：实际执行时仍使用参数化查询）
+    debug_sql = query
+    for i, param in enumerate(params):
+        debug_sql = debug_sql.replace(f"${i+1}", f"'{param}'" if isinstance(param, str) else str(param))
+    logger.info(f"调试用完整SQL: {debug_sql}")
 
-    try:
-        # 使用独立的连接执行查询
-        conn = await pool.acquire()
-        try:
-            results = await conn.fetch(query, *params)
-            # 转换结果为字典列表
-            return [dict(row) for row in results]
-        finally:
-            # 确保连接被归还到池中
-            await pool.release(conn)
-    except Exception as e:
-        await ctx.error(f"查询出错: {str(e)}")
-        return []
+
+
+    with get_db_connection(row_factory=dict_row) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query,params)  # type: ignore
+            rows: list[dict[str, Any]] = cursor.fetchall()  # type: ignore
+    processed_rows = []
+    for row in rows:
+        processed_row = {}
+        for key, value in row.items():
+            # Convert UUID objects to strings
+            if isinstance(value, uuid.UUID):
+                processed_row[key] = str(value)
+            else:
+                processed_row[key] = value
+        processed_rows.append(processed_row)
+
+    yaml_summary = yaml.dump(processed_rows)
+    return yaml_summary
+
 
 
 @mcp.tool()
@@ -104,14 +142,12 @@ async def query_menu(
         is_disable: Annotated[Optional[str], Field(description="是否禁用，0-未禁用，1-已禁用")] = None,
         limit: Annotated[int, Field(description="返回结果数量限制", ge=1, le=100)] = 10,
         ctx: Context = None
-) -> List[Dict]:
+) -> str:
     """
     查询系统菜单表(sys_menu)，可根据菜单名称、父级ID、菜单类型和禁用状态进行筛选
     """
     await ctx.info(f"正在查询菜单数据...")
-
-    # 获取数据库连接池
-    pool = await get_db_pool()
+    logger.info(f"开始菜单查询，参数: 菜单名称={menu_name}, 父级ID={parent_id}, 菜单类型={menu_type}, 禁用状态={is_disable}, 限制={limit}")
 
     # 构建SQL查询
     query = "SELECT * FROM public.sys_menu WHERE 1=1"
@@ -122,134 +158,57 @@ async def query_menu(
         query += f" AND menu_name ILIKE ${param_index}"
         params.append(f'%{menu_name}%')
         param_index += 1
+        logger.debug(f"添加菜单名称过滤条件: menu_name ILIKE '%{menu_name}%'")
 
     if parent_id is not None:
         query += f" AND parent_id = ${param_index}"
         params.append(parent_id)
         param_index += 1
+        logger.debug(f"添加父级ID过滤条件: parent_id = {parent_id}")
 
     if menu_type:
         query += f" AND menu_type = ${param_index}"
         params.append(menu_type)
         param_index += 1
+        logger.debug(f"添加菜单类型过滤条件: menu_type = '{menu_type}'")
 
     if is_disable is not None:
         query += f" AND is_disable = ${param_index}"
         params.append(is_disable)
         param_index += 1
+        logger.debug(f"添加禁用状态过滤条件: is_disable = '{is_disable}'")
 
     query += f" ORDER BY sort ASC, create_time DESC LIMIT ${param_index}"
     params.append(limit)
+    
+    # 记录最终SQL和参数
+    logger.info(f"构建的SQL查询: {query}")
+    logger.info(f"查询参数: {params}")
+    
+    # 构建带值的SQL用于调试（注意：实际执行时仍使用参数化查询）
+    debug_sql = query
+    for i, param in enumerate(params):
+        debug_sql = debug_sql.replace(f"${i+1}", f"'{param}'" if isinstance(param, str) else str(param))
+    logger.info(f"调试用完整SQL: {debug_sql}")
 
-    try:
-        # 使用独立的连接执行查询
-        conn = await pool.acquire()
-        try:
-            results = await conn.fetch(query, *params)
-            # 转换结果为字典列表
-            return [dict(row) for row in results]
-        finally:
-            # 确保连接被归还到池中
-            await pool.release(conn)
-    except Exception as e:
-        await ctx.error(f"查询出错: {str(e)}")
-        return []
+    with get_db_connection(row_factory=dict_row) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query, params)  # type: ignore
+            rows: list[dict[str, Any]] = cursor.fetchall()  # type: ignore
+    processed_rows = []
+    for row in rows:
+        processed_row = {}
+        for key, value in row.items():
+            # Convert UUID objects to strings
+            if isinstance(value, uuid.UUID):
+                processed_row[key] = str(value)
+            else:
+                processed_row[key] = value
+        processed_rows.append(processed_row)
 
+    yaml_summary = yaml.dump(processed_rows)
+    return yaml_summary
 
-@mcp.tool()
-async def get_faq_statistics(ctx: Context = None) -> Dict:
-    """
-    获取奇瑞星途客户问答表的统计信息，包括总数、各工单类型数量、各问题分类数量
-    """
-    await ctx.info("正在统计FAQ数据...")
-
-    # 获取数据库连接池
-    pool = await get_db_pool()
-
-    try:
-        # 使用独立的连接执行查询
-        conn = await pool.acquire()
-        try:
-            # 获取总数
-            total_count = await conn.fetchval("SELECT COUNT(*) FROM public.cheery_exeedcars_faq")
-
-            # 获取各工单类型数量
-            ticket_type_stats = await conn.fetch(
-                "SELECT ticket_type, COUNT(*) as count FROM public.cheery_exeedcars_faq GROUP BY ticket_type"
-            )
-
-            # 获取各问题分类数量
-            issue_module_stats = await conn.fetch(
-                "SELECT issue_module, COUNT(*) as count FROM public.cheery_exeedcars_faq GROUP BY issue_module"
-            )
-
-            return {
-                "total_count": total_count,
-                "ticket_type_stats": [dict(row) for row in ticket_type_stats],
-                "issue_module_stats": [dict(row) for row in issue_module_stats]
-            }
-        finally:
-            # 确保连接被归还到池中
-            await pool.release(conn)
-    except Exception as e:
-        await ctx.error(f"统计出错: {str(e)}")
-        return {"error": str(e)}
-
-
-@mcp.tool()
-async def get_menu_statistics(ctx: Context = None) -> Dict:
-    """
-    获取系统菜单表的统计信息，包括菜单总数、各类型菜单数量、启用/禁用菜单数量
-    """
-    await ctx.info("正在统计菜单数据...")
-
-    # 获取数据库连接池
-    pool = await get_db_pool()
-
-    try:
-        # 使用独立的连接执行查询
-        conn = await pool.acquire()
-        try:
-            # 获取总数
-            total_count = await conn.fetchval("SELECT COUNT(*) FROM public.sys_menu")
-
-            # 获取各菜单类型数量
-            menu_type_stats = await conn.fetch(
-                "SELECT menu_type, COUNT(*) as count FROM public.sys_menu GROUP BY menu_type"
-            )
-
-            # 获取启用/禁用菜单数量
-            status_stats = await conn.fetch(
-                "SELECT is_disable, COUNT(*) as count FROM public.sys_menu GROUP BY is_disable"
-            )
-
-            return {
-                "total_count": total_count,
-                "menu_type_stats": [dict(row) for row in menu_type_stats],
-                "status_stats": [dict(row) for row in status_stats]
-            }
-        finally:
-            # 确保连接被归还到池中
-            await pool.release(conn)
-    except Exception as e:
-        await ctx.error(f"统计出错: {str(e)}")
-        return {"error": str(e)}
-
-
-# 初始化和清理函数
-async def startup():
-    """服务启动时初始化数据库连接池"""
-    await get_db_pool()
-    print("数据库连接池已初始化")
-
-
-async def shutdown():
-    """服务关闭时关闭数据库连接池"""
-    global db_pool
-    if db_pool:
-        await db_pool.close()
-        print("数据库连接池已关闭")
-        db_pool = None
 
 
 if __name__ == "__main__":
@@ -258,28 +217,26 @@ if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8086"))
     
-    # 初始化数据库连接
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(startup())
+    logger.info(f"服务配置: 传输模式={transport_mode}, 主机={host}, 端口={port}")
+    
+
+    # transport_mode = "sse"
     
     try:
         if transport_mode == "stdio":
             # STDIO模式 - 适用于终端或命令行客户端
-            print("正在使用STDIO模式启动PostgreSQL查询服务...")
+            logger.info("正在使用STDIO模式启动PostgreSQL查询服务...")
             mcp.run(transport="stdio")
             
         elif transport_mode == "sse":
             # SSE模式 - 适用于SSE客户端
-            print(f"正在使用SSE模式启动PostgreSQL查询服务，端点位于: http://{host}:{port}/mcp/sse")
+            logger.info(f"正在使用SSE模式启动PostgreSQL查询服务，端点位于: http://{host}:{port}/mcp/sse")
             mcp.run(transport="sse", host=host, port=port)
             
         else:
             # HTTP模式 - 适用于Web客户端或Dify等平台
-            print(f"正在使用HTTP模式启动PostgreSQL查询服务，端点位于: http://{host}:{port}/mcp")
+            logger.info(f"正在使用HTTP模式启动PostgreSQL查询服务，端点位于: http://{host}:{port}/mcp")
             mcp.run(transport="streamable-http", host=host, port=port, path="/mcp")
             
     except KeyboardInterrupt:
-        print("服务已通过键盘中断停止")
-    finally:
-        # 关闭数据库连接
-        loop.run_until_complete(shutdown()) 
+        logger.info("服务已通过键盘中断停止")
