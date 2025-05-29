@@ -83,34 +83,27 @@ async def query_faq(
     if question:
         query += " AND question ILIKE %s"
         params.append(f'%{question}%')
-        logger.debug(f"添加问题过滤条件: question ILIKE '%{question}%'")
 
     if ticket_type:
         query += " AND ticket_type = %s"
         params.append(ticket_type)
-        logger.debug(f"添加工单类型过滤条件: ticket_type = '{ticket_type}'")
 
     if issue_module:
         query += " AND issue_module = %s"
         params.append(issue_module)
-        logger.debug(f"添加问题分类过滤条件: issue_module = '{issue_module}'")
 
     query += " ORDER BY create_at DESC LIMIT %s"
     params.append(limit)
 
     # 记录最终SQL和参数
-    logger.info(f"构建的SQL查询: {query}")
-    logger.info(f"查询参数: {params}")
 
-    # 构建带值的SQL用于调试（注意：实际执行时仍使用参数化查询）
     debug_sql = query
     for i, param in enumerate(params):
         placeholder = "%s"
         debug_sql = debug_sql.replace(placeholder, f"'{param}'" if isinstance(param, str) else str(param), 1)
-    logger.info(f"调试用完整SQL: {debug_sql}")
-    logger.info(f"调试用完整SQL: {query}")
 
-
+    logger.info(f"构建的SQL查询: {debug_sql}")
+    logger.info(f"查询参数: {params}")
     with get_db_connection(row_factory=dict_row) as conn:
         with conn.cursor() as cursor:
             cursor.execute(debug_sql)  # type: ignore
@@ -126,9 +119,6 @@ async def query_faq(
                 processed_row[key] = value
         processed_rows.append(processed_row)
 
-    yaml_summary = yaml.dump(processed_rows)
-    print(processed_rows)
-    # print(yaml_summary)
     return processed_rows
 
 
@@ -155,36 +145,30 @@ async def query_menu(
     if menu_name:
         query += " AND menu_name ILIKE %s"
         params.append(f'%{menu_name}%')
-        logger.debug(f"添加菜单名称过滤条件: menu_name ILIKE '%{menu_name}%'")
 
     if parent_id is not None:
         query += " AND parent_id = %s"
         params.append(parent_id)
-        logger.debug(f"添加父级ID过滤条件: parent_id = {parent_id}")
 
     if menu_type:
         query += " AND menu_type = %s"
         params.append(menu_type)
-        logger.debug(f"添加菜单类型过滤条件: menu_type = '{menu_type}'")
 
     if is_disable is not None:
         query += " AND is_disable = %s"
         params.append(is_disable)
-        logger.debug(f"添加禁用状态过滤条件: is_disable = '{is_disable}'")
 
     query += " ORDER BY sort ASC, create_time DESC LIMIT %s"
     params.append(limit)
 
     # 记录最终SQL和参数
-    logger.info(f"构建的SQL查询: {query}")
-    logger.info(f"查询参数: {params}")
-
-    # 构建带值的SQL用于调试（注意：实际执行时仍使用参数化查询）
     debug_sql = query
     for i, param in enumerate(params):
         placeholder = "%s"
         debug_sql = debug_sql.replace(placeholder, f"'{param}'" if isinstance(param, str) else str(param), 1)
-    logger.info(f"调试用完整SQL: {debug_sql}")
+
+    logger.info(f"构建的SQL查询: {debug_sql}")
+    logger.info(f"查询参数: {params}")
 
     with get_db_connection(row_factory=dict_row) as conn:
         with conn.cursor() as cursor:
@@ -201,7 +185,6 @@ async def query_menu(
                 processed_row[key] = value
         processed_rows.append(processed_row)
 
-    yaml_summary = yaml.dump(processed_rows)
     return processed_rows
 
 
