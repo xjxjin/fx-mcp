@@ -68,7 +68,7 @@ async def query_faq(
         issue_module: Annotated[Optional[str], Field(description="问题分类")] = None,
         limit: Annotated[int, Field(description="返回结果数量限制", ge=1, le=100)] = 10,
         ctx: Context = None
-) -> List[dict]:
+) -> str:
     """
     查询奇瑞星途客户问答表(cheery_exeedcars_faq)，可根据问题关键词、工单类型、问题分类进行筛选
     """
@@ -95,7 +95,6 @@ async def query_faq(
     params.append(limit)
 
     # 记录最终SQL和参数
-
     debug_sql = query
     for i, param in enumerate(params):
         placeholder = "%s"
@@ -103,22 +102,23 @@ async def query_faq(
 
     logger.info(f"构建的SQL查询: {debug_sql}")
     logger.info(f"查询参数: {params}")
+
     with get_db_connection(row_factory=dict_row) as conn:
         with conn.cursor() as cursor:
             cursor.execute(debug_sql)  # type: ignore
             rows: list[dict[str, Any]] = cursor.fetchall()  # type: ignore
-    processed_rows = []
-    for row in rows:
-        processed_row = {}
-        for key, value in row.items():
-            # Convert UUID objects to strings
-            if isinstance(value, uuid.UUID):
-                processed_row[key] = str(value)
-            else:
-                processed_row[key] = value
-        processed_rows.append(processed_row)
-
-    return processed_rows
+    
+    # 构建Markdown格式返回
+    md_result = "# 查询结果\n\n"
+    if not rows:
+        md_result += "未找到匹配的记录。\n"
+    else:
+        for i, row in enumerate(rows):
+            md_result += f"## {i+1}. {row.get('question', '无问题')}\n\n"
+            md_result += f"{row.get('answer', '无答案')}\n\n"
+            md_result += "---\n\n"
+    
+    return md_result
 
 
 
@@ -130,7 +130,7 @@ async def query_menu(
         is_disable: Annotated[Optional[str], Field(description="是否禁用，0-未禁用，1-已禁用")] = None,
         limit: Annotated[int, Field(description="返回结果数量限制", ge=1, le=100)] = 10,
         ctx: Context = None
-) -> List[dict]:
+) -> str:
     """
     查询系统菜单表(sys_menu)，可根据菜单名称、父级ID、菜单类型和禁用状态进行筛选
     """
@@ -173,18 +173,29 @@ async def query_menu(
         with conn.cursor() as cursor:
             cursor.execute(debug_sql)  # type: ignore
             rows: list[dict[str, Any]] = cursor.fetchall()  # type: ignore
-    processed_rows = []
-    for row in rows:
-        processed_row = {}
-        for key, value in row.items():
-            # Convert UUID objects to strings
-            if isinstance(value, uuid.UUID):
-                processed_row[key] = str(value)
-            else:
-                processed_row[key] = value
-        processed_rows.append(processed_row)
-
-    return processed_rows
+    
+    # 构建Markdown格式返回
+    md_result = "# 菜单查询结果\n\n"
+    
+    if not rows:
+        md_result += "未找到匹配的记录。\n"
+    else:
+        # 创建表头
+        md_result += "| 菜单ID | 菜单名称 | 路由 | 类型 | 排序 | 状态 |\n"
+        md_result += "|--------|----------|------|------|------|------|\n"
+        
+        # 添加数据行
+        for row in rows:
+            menu_id = row.get('menu_id', '')
+            menu_name = row.get('menu_name', '')
+            router = row.get('router', '')
+            menu_type = row.get('menu_type', '')
+            sort = row.get('sort', '')
+            is_disable = '禁用' if row.get('is_disable') == '1' else '启用'
+            
+            md_result += f"| {menu_id} | {menu_name} | {router} | {menu_type} | {sort} | {is_disable} |\n"
+    
+    return md_result
 
 
 
