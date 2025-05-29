@@ -10,7 +10,6 @@ from psycopg import Connection
 
 from psycopg.rows import dict_row
 from psycopg.rows import tuple_row
-import yaml
 import uuid
 from collections.abc import Callable
 from typing import Any
