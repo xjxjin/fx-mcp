@@ -188,12 +188,12 @@ async def query_menu(
         for row in rows:
             menu_id = row.get('menu_id', '')
             menu_name = row.get('menu_name', '')
-            router = row.get('router', '')
+            menu_url = row.get('menu_url', '')
             menu_type = row.get('menu_type', '')
             sort = row.get('sort', '')
             is_disable = '禁用' if row.get('is_disable') == '1' else '启用'
             
-            md_result += f"| {menu_id} | {menu_name} | {router} | {menu_type} | {sort} | {is_disable} |\n"
+            md_result += f"| {menu_id} | {menu_name} | {menu_url} | {menu_type} | {sort} | {is_disable} |\n"
     
     return md_result
 
